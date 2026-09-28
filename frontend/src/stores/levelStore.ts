@@ -4,11 +4,14 @@ import type { CueLevel } from '@/types/level'
 import { INTENSITY_MAX, INTENSITY_MIN } from '@/types/level'
 import { db } from '@/utils/db'
 import { createId } from '@/utils/id'
+import { normalizeDelaySec } from '@/utils/fade'
 
 /** 通道电平补丁 */
 export interface CueLevelPatch {
   intensity?: number
   colorTempK?: number
+  /** 开灯延迟（秒），不得越过下一条 Cue 触发点（由调用方校验） */
+  turnOnDelaySec?: number
   focusNote?: string
 }
 
@@ -54,7 +57,11 @@ export const useLevelStore = defineStore('level', () => {
   }
 
   async function hydrate(): Promise<void> {
-    levels.value = await db.levels.toArray()
+    // 旧版本数据没有 turnOnDelaySec，载入时统一按 0 秒归一化
+    levels.value = (await db.levels.toArray()).map((level) => ({
+      ...level,
+      turnOnDelaySec: normalizeDelaySec(level.turnOnDelaySec)
+    }))
     hydrated.value = true
   }
 
@@ -66,6 +73,10 @@ export const useLevelStore = defineStore('level', () => {
         ...existing,
         intensity: patch.intensity === undefined ? existing.intensity : clampIntensity(patch.intensity),
         colorTempK: patch.colorTempK === undefined ? existing.colorTempK : Math.round(patch.colorTempK),
+        turnOnDelaySec:
+          patch.turnOnDelaySec === undefined
+            ? existing.turnOnDelaySec
+            : normalizeDelaySec(patch.turnOnDelaySec),
         focusNote: patch.focusNote === undefined ? existing.focusNote : patch.focusNote,
         updatedAt: now
       }
@@ -79,6 +90,7 @@ export const useLevelStore = defineStore('level', () => {
       fixtureId,
       intensity: clampIntensity(patch.intensity ?? 0),
       colorTempK: Math.round(patch.colorTempK ?? 3200),
+      turnOnDelaySec: normalizeDelaySec(patch.turnOnDelaySec ?? 0),
       focusNote: patch.focusNote ?? '',
       updatedAt: now
     }

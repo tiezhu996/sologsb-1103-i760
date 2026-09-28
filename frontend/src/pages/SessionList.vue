@@ -19,6 +19,7 @@ import BlankHint from '@/components/common/BlankHint.vue'
 import FadeBar from '@/components/common/FadeBar.vue'
 import { useCueOrder } from '@/hooks/useCueOrder'
 import { useCueStore } from '@/stores/cueStore'
+import { useLevelStore } from '@/stores/levelStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import type { CueOrderSummary } from '@/types/cue'
 import { createEmptySessionDraft, type Session, type SessionDraft, type SessionStat } from '@/types/session'
@@ -29,6 +30,7 @@ const message = useMessage()
 const dialog = useDialog()
 const sessionStore = useSessionStore()
 const cueStore = useCueStore()
+const levelStore = useLevelStore()
 
 const currentSessionId = computed(() => sessionStore.currentSessionId ?? '')
 const { summary: currentSummary, hardCutCount } = useCueOrder(currentSessionId)
@@ -47,11 +49,16 @@ const stats = computed<Record<string, SessionStat>>(() => {
   return map
 })
 
-/** 每个场次的过渡拆分，用于卡片上的渐变条 */
+/** 每个场次的过渡拆分，用于卡片上的渐变条（总时长按最晚结束通道含开灯延迟） */
 const summaries = computed<Record<string, CueOrderSummary>>(() => {
   const map: Record<string, CueOrderSummary> = {}
   sessionStore.sortedSessions.forEach((session) => {
-    map[session.id] = sumCues(cueStore.cuesOfSession(session.id))
+    const cues = cueStore.cuesOfSession(session.id)
+    const levelsByCue: Record<string, ReturnType<typeof levelStore.levelsOfCue>> = {}
+    cues.forEach((cue) => {
+      levelsByCue[cue.id] = levelStore.levelsOfCue(cue.id)
+    })
+    map[session.id] = sumCues(cues, levelsByCue)
   })
   return map
 })
@@ -196,6 +203,7 @@ function focusSession(id: string): void {
           :fade-in-sec="currentSummary.totalFadeInSec"
           :hold-sec="currentSummary.totalHoldSec"
           :fade-out-sec="currentSummary.totalFadeOutSec"
+          :turn-on-delay-sec="currentSummary.totalTurnOnDelaySec"
         />
         <p v-else class="empty-line">当前场次还没有 Cue，先到 Cue 编排时间轴插入提示点。</p>
       </div>
@@ -261,6 +269,7 @@ function focusSession(id: string): void {
           :fade-in-sec="summaries[session.id]?.totalFadeInSec ?? 0"
           :hold-sec="summaries[session.id]?.totalHoldSec ?? 0"
           :fade-out-sec="summaries[session.id]?.totalFadeOutSec ?? 0"
+          :turn-on-delay-sec="summaries[session.id]?.totalTurnOnDelaySec ?? 0"
           compact
         />
         <p v-else class="empty-line">尚未插入 Cue</p>

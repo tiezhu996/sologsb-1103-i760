@@ -51,7 +51,9 @@ export interface CueOrderSummary {
   totalFadeInSec: number
   totalFadeOutSec: number
   totalHoldSec: number
-  /** 全场过渡总时长（秒） */
+  /** 各条 Cue 最晚通道开灯延迟之和（秒） */
+  totalTurnOnDelaySec: number
+  /** 全场总时长（秒，含各条最晚结束通道的开灯延迟） */
   totalSec: number
   adjacent: AdjacentTransition[]
 }

@@ -9,6 +9,8 @@ export interface SheetChannelLine {
   gel: string
   intensity: number
   colorTempK: number
+  /** 开灯延迟（秒），旧版本排演表缺省按 0 秒 */
+  turnOnDelaySec: number
   focusNote: string
 }
 
@@ -21,6 +23,8 @@ export interface SheetCueLine {
   fadeInSec: number
   fadeOutSec: number
   holdSec: number
+  /** 本条各通道开灯延迟的最大值（秒），决定最晚结束通道；旧快照缺省 0 */
+  maxTurnOnDelaySec: number
   note: string
   channels: SheetChannelLine[]
 }

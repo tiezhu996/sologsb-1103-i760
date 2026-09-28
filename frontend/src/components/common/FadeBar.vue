@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { fadeRatio, formatSeconds, round1 } from '@/utils/fade'
+import { fadeRatio, formatSeconds, normalizeDelaySec, round1 } from '@/utils/fade'
 
 /**
- * FadeBar 可视化渐变条：按渐亮 / 保持 / 渐暗时长比例绘制。
+ * FadeBar 可视化渐变条：按开灯等待 / 渐亮 / 保持 / 渐暗时长比例绘制。
  * 被场次编排（场次汇总比例）与 Cue 时间轴（单条 Cue 比例）共同消费。
  */
 const props = withDefaults(
@@ -14,6 +14,8 @@ const props = withDefaults(
     holdSec: number
     /** 渐暗时长（秒） */
     fadeOutSec: number
+    /** 最晚结束通道的开灯延迟（秒），默认 0 */
+    turnOnDelaySec?: number
     /** 条高（px） */
     height?: number
     /** 是否显示图例与合计 */
@@ -22,27 +24,40 @@ const props = withDefaults(
     compact?: boolean
   }>(),
   {
+    turnOnDelaySec: 0,
     height: 16,
     showLegend: true,
     compact: false
   }
 )
 
-const ratio = computed(() => fadeRatio(props))
+const delaySec = computed(() => normalizeDelaySec(props.turnOnDelaySec))
 
-const totalSec = computed(() => round1(props.fadeInSec + props.holdSec + props.fadeOutSec))
+const ratio = computed(() => fadeRatio(props, delaySec.value))
+
+const totalSec = computed(() =>
+  round1(delaySec.value + props.fadeInSec + props.holdSec + props.fadeOutSec)
+)
 
 const segments = computed(() =>
   [
+    {
+      key: 'turnOn',
+      label: '等待',
+      ratio: ratio.value.turnOn,
+      sec: delaySec.value,
+      background: 'repeating-linear-gradient(45deg, #3a3f55 0 6px, #2b2f40 6px 12px)'
+    },
     { key: 'fadeIn', label: '渐亮', ratio: ratio.value.fadeIn, sec: props.fadeInSec, background: 'linear-gradient(90deg, #40341a 0%, #f2b544 100%)' },
     { key: 'hold', label: '保持', ratio: ratio.value.hold, sec: props.holdSec, background: 'linear-gradient(90deg, #f2b544 0%, #f6d38a 100%)' },
     { key: 'fadeOut', label: '渐暗', ratio: ratio.value.fadeOut, sec: props.fadeOutSec, background: 'linear-gradient(90deg, #f6d38a 0%, #2c2f3a 100%)' }
   ].filter((segment) => segment.ratio > 0)
 )
 
-const legendText = computed(
-  () => `+${formatSeconds(props.fadeInSec)} / 保持 ${formatSeconds(props.holdSec)} / -${formatSeconds(props.fadeOutSec)}`
-)
+const legendText = computed(() => {
+  const base = `+${formatSeconds(props.fadeInSec)} / 保持 ${formatSeconds(props.holdSec)} / -${formatSeconds(props.fadeOutSec)}`
+  return delaySec.value > 0 ? `等待 ${formatSeconds(delaySec.value)} → ${base}` : base
+})
 </script>
 
 <template>
@@ -53,6 +68,7 @@ const legendText = computed(
           v-for="segment in segments"
           :key="segment.key"
           class="fade-bar__segment"
+          :class="{ 'fade-bar__segment--wait': segment.key === 'turnOn' }"
           :style="{ width: `${segment.ratio * 100}%`, background: segment.background }"
           :title="`${segment.label} ${formatSeconds(segment.sec)}`"
         >
@@ -91,6 +107,11 @@ const legendText = computed(
   justify-content: center;
   min-width: 2px;
   transition: width 0.25s ease;
+}
+
+.fade-bar__segment--wait .fade-bar__segment-text {
+  color: rgba(255, 255, 255, 0.72);
+  letter-spacing: 2px;
 }
 
 .fade-bar__segment-text {

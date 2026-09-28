@@ -2,13 +2,13 @@ import Dexie, { type Table } from 'dexie'
 import type { Cue } from '@/types/cue'
 import type { Fixture } from '@/types/fixture'
 import type { CueLevel } from '@/types/level'
-import type { RehearsalSheet } from '@/types/sheet'
+import type { RehearsalSheet, SheetChannelLine, SheetCueLine } from '@/types/sheet'
 import type { Session } from '@/types/session'
 
 /** IndexedDB 数据库名 */
 export const DB_NAME = 'gbcuesheet'
 /** 当前数据结构版本号，与 db.version() 对应 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** 单键值元数据表，记录结构版本等本地状态 */
 export interface AppMetaRecord {
@@ -22,6 +22,8 @@ export interface AppMetaRecord {
  * - v1：场次 / 灯位通道 / Cue / 通道电平 / 排演表 五张表
  * - v2：场次补充 updatedAt 索引、排演表补充 sheetNo 索引与条目快照、新增 appMeta 元数据表，
  *       并对既有数据执行升级迁移（补齐字段、规范化遗留编号）
+ * - v3：通道电平新增开灯延迟 turnOnDelaySec（旧数据按 0 秒），
+ *       排演表快照补通道延迟与每条 Cue 的最大延迟（旧快照按 0 秒）
  */
 export class CueSheetDatabase extends Dexie {
   sessions!: Table<Session, string>
@@ -74,6 +76,54 @@ export class CueSheetDatabase extends Dexie {
             if (!sheet.sheetNo) sheet.sheetNo = 'RS-LEGACY'
             if (!Array.isArray(sheet.cueLines)) sheet.cueLines = []
             if (!Array.isArray(sheet.includedCueIds)) sheet.includedCueIds = []
+          })
+      })
+
+    this.version(3)
+      .stores({
+        sessions: 'id, order, createdAt, updatedAt',
+        fixtures: 'id, sessionId, channel, [sessionId+channel]',
+        cues: 'id, sessionId, cueNo, orderIndex, [sessionId+orderIndex]',
+        levels: 'id, cueId, fixtureId, [cueId+fixtureId]',
+        sheets: 'id, sessionId, sheetNo, generatedAt',
+        appMeta: 'key'
+      })
+      .upgrade(async (transaction) => {
+        // 旧通道电平没有开灯延迟，统一补 0 秒
+        await transaction
+          .table('levels')
+          .toCollection()
+          .modify((level: CueLevel) => {
+            if (typeof level.turnOnDelaySec !== 'number' || !Number.isFinite(level.turnOnDelaySec)) {
+              level.turnOnDelaySec = 0
+            } else if (level.turnOnDelaySec < 0) {
+              level.turnOnDelaySec = 0
+            }
+          })
+        // 旧排演表快照没有延迟字段，逐条补通道延迟与该条最大延迟
+        await transaction
+          .table('sheets')
+          .toCollection()
+          .modify((sheet: RehearsalSheet) => {
+            if (!Array.isArray(sheet.cueLines)) sheet.cueLines = []
+            sheet.cueLines.forEach((cueLine: SheetCueLine) => {
+              if (!Array.isArray(cueLine.channels)) cueLine.channels = []
+              let maxDelay = 0
+              cueLine.channels.forEach((channelLine: SheetChannelLine) => {
+                const delay =
+                  typeof channelLine.turnOnDelaySec === 'number' &&
+                  Number.isFinite(channelLine.turnOnDelaySec) &&
+                  channelLine.turnOnDelaySec > 0
+                    ? channelLine.turnOnDelaySec
+                    : 0
+                channelLine.turnOnDelaySec = Math.round(delay * 10) / 10
+                maxDelay = Math.max(maxDelay, channelLine.turnOnDelaySec)
+              })
+              cueLine.maxTurnOnDelaySec =
+                typeof cueLine.maxTurnOnDelaySec === 'number' && Number.isFinite(cueLine.maxTurnOnDelaySec)
+                  ? Math.max(cueLine.maxTurnOnDelaySec, maxDelay)
+                  : Math.round(maxDelay * 10) / 10
+            })
           })
       })
   }

@@ -37,11 +37,16 @@ export const useSessionStore = defineStore('session', () => {
   function statOf(sessionId: string): SessionStat {
     const cueStore = useCueStore()
     const fixtureStore = useFixtureStore()
+    const levelStore = useLevelStore()
     if (!sessionById(sessionId)) return emptyStat()
     const cues = cueStore.cuesOfSession(sessionId)
+    const levelsByCue: Record<string, ReturnType<typeof levelStore.levelsOfCue>> = {}
+    cues.forEach((cue) => {
+      levelsByCue[cue.id] = levelStore.levelsOfCue(cue.id)
+    })
     return {
       cueCount: cues.length,
-      totalFadeSec: sumCues(cues).totalSec,
+      totalFadeSec: sumCues(cues, levelsByCue).totalSec,
       fixtureCount: fixtureStore.fixturesOfSession(sessionId).length
     }
   }

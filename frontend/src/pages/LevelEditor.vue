@@ -11,8 +11,18 @@ import { useFixtureStore } from '@/stores/fixtureStore'
 import { useLevelStore } from '@/stores/levelStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import type { Fixture, FixturePosition } from '@/types/fixture'
-import { COLOR_TEMP_MAX, COLOR_TEMP_MIN, COLOR_TEMP_STEP } from '@/types/level'
-import { cueTotalSeconds, checkColorTempConsistency, formatSeconds, formatTransition } from '@/utils/fade'
+import { COLOR_TEMP_MAX, COLOR_TEMP_MIN, COLOR_TEMP_STEP, TURN_ON_DELAY_STEP } from '@/types/level'
+import {
+  checkTurnOnDelay,
+  checkColorTempConsistency,
+  cueDurationSeconds,
+  cueTotalSeconds,
+  formatSeconds,
+  formatTransition,
+  maxTurnOnDelay,
+  normalizeDelaySec,
+  turnOnDelayLimit
+} from '@/utils/fade'
 import { normalizeCueNo } from '@/utils/cueOrder'
 
 const route = useRoute()
@@ -60,6 +70,35 @@ const tempCheck = computed(() => checkColorTempConsistency(tempItems.value))
 
 const defaultTempK = computed(() => (tempCheck.value.dominantK > 0 ? tempCheck.value.dominantK : 3200))
 
+const siblingCues = computed(() => (sessionId.value ? cueStore.sortedCuesOfSession(sessionId.value) : []))
+
+/** 当前 Cue 是否后面还有 Cue（末条不设延迟上限） */
+const hasNextCue = computed(() => {
+  const index = siblingCues.value.findIndex((item) => item.id === cueId.value)
+  return index >= 0 && index < siblingCues.value.length - 1
+})
+
+/** 本 Cue 各通道开灯延迟的最大值（秒），决定最晚结束通道 */
+const maxDelaySec = computed(() => maxTurnOnDelay(levels.value))
+
+/** 延迟上限（秒），末条 Cue 为 null */
+const delayLimitSec = computed(() => (cue.value ? turnOnDelayLimit(cue.value, hasNextCue.value) : null))
+
+/** 延迟相关的总体提示条文案 */
+const delayHint = computed(() => {
+  if (!cue.value) return null
+  if (!hasNextCue.value) {
+    return { type: 'info' as const, text: '末条 Cue 无后续触发点，开灯延迟不设上限。' }
+  }
+  const limit = delayLimitSec.value ?? 0
+  return {
+    type: 'info' as const,
+    text: `开灯延迟从 Cue 触发后开始计时；最晚通道不得越过下一条 Cue 触发点，上限为本条渐暗时长 ${formatSeconds(
+      limit
+    )}（基础过渡共 ${formatSeconds(cueTotalSeconds(cue.value))}）。`
+  }
+})
+
 function isEnabled(fixtureId: string): boolean {
   return levelStore.levelOf(cueId.value, fixtureId) !== null
 }
@@ -70,6 +109,27 @@ function intensityOf(fixtureId: string): number {
 
 function tempOf(fixtureId: string): number {
   return levelStore.levelOf(cueId.value, fixtureId)?.colorTempK ?? defaultTempK.value
+}
+
+function delayOf(fixtureId: string): number {
+  return normalizeDelaySec(levelStore.levelOf(cueId.value, fixtureId)?.turnOnDelaySec)
+}
+
+/** 单个通道的延迟上限校验（用于行内提示） */
+function delayCheckOf(fixtureId: string) {
+  if (!cue.value) return null
+  return checkTurnOnDelay(delayOf(fixtureId), cue.value, hasNextCue.value)
+}
+
+/** 设置开灯延迟：越过下一条 Cue 触发点时当场提示并拒绝保存 */
+async function setTurnOnDelay(fixtureId: string, value: number | null): Promise<void> {
+  if (!cue.value || value === null) return
+  const check = checkTurnOnDelay(value, cue.value, hasNextCue.value)
+  if (!check.ok) {
+    message.error(check.message)
+    return
+  }
+  await levelStore.upsertLevel(cueId.value, fixtureId, { turnOnDelaySec: normalizeDelaySec(value) })
 }
 
 const focusDrafts = ref<Record<string, string>>({})
@@ -138,8 +198,6 @@ async function commitCueNo(value: string): Promise<void> {
   message.success(`编号已改为 ${normalized}`)
 }
 
-const siblingCues = computed(() => (sessionId.value ? cueStore.sortedCuesOfSession(sessionId.value) : []))
-
 function goSiblingCue(direction: -1 | 1): void {
   if (!cue.value) return
   const index = siblingCues.value.findIndex((item) => item.id === cue.value?.id)
@@ -191,7 +249,10 @@ function goSheets(): void {
           <CueNoInput :model-value="cue.cueNo" :existing-nos="siblingNos" width="130px" @commit="commitCueNo" />
           <div class="cue-head__titles">
             <p class="cue-head__label">{{ cue.label || '（未填写提示语）' }}</p>
-            <p class="cue-head__meta mono">{{ formatTransition(cue) }} · 合计 {{ formatSeconds(cueTotalSeconds(cue)) }}</p>
+            <p class="cue-head__meta mono">
+              {{ formatTransition(cue, maxDelaySec) }} · 最晚通道结束合计
+              {{ formatSeconds(cueDurationSeconds(cue, maxDelaySec)) }}
+            </p>
           </div>
           <NTag size="small" :bordered="false" type="warning">{{ cue.trigger }}</NTag>
           <span class="toolbar__spacer" />
@@ -200,9 +261,19 @@ function goSheets(): void {
         </div>
 
         <div class="cue-head__bar">
-          <FadeBar :fade-in-sec="cue.fadeInSec" :hold-sec="cue.holdSec" :fade-out-sec="cue.fadeOutSec" :height="14" />
+          <FadeBar
+            :fade-in-sec="cue.fadeInSec"
+            :hold-sec="cue.holdSec"
+            :fade-out-sec="cue.fadeOutSec"
+            :turn-on-delay-sec="maxDelaySec"
+            :height="14"
+          />
         </div>
       </section>
+
+      <NAlert v-if="delayHint" :type="delayHint.type" :bordered="false">
+        {{ delayHint.text }}
+      </NAlert>
 
       <NAlert :type="tempCheck.consistent ? 'success' : 'warning'" :bordered="false">
         {{ tempCheck.message }}
@@ -238,6 +309,7 @@ function goSheets(): void {
             <span>通道</span>
             <span>亮度</span>
             <span>色温</span>
+            <span>开灯延迟</span>
             <span>对焦说明</span>
           </div>
 
@@ -306,6 +378,28 @@ function goSheets(): void {
               </span>
             </div>
 
+            <div class="level-row__control level-row__delay">
+              <NInputNumber
+                :value="delayOf(fixture.id)"
+                size="small"
+                :min="0"
+                :step="TURN_ON_DELAY_STEP"
+                :show-button="false"
+                :disabled="!isEnabled(fixture.id)"
+                :status="isEnabled(fixture.id) && delayCheckOf(fixture.id) && !delayCheckOf(fixture.id)?.ok ? 'error' : undefined"
+                style="width: 86px"
+                @update:value="(value) => setTurnOnDelay(fixture.id, value)"
+              />
+              <span class="level-row__delay-suffix mono">秒</span>
+              <span
+                v-if="isEnabled(fixture.id)"
+                class="level-row__drift mono"
+                :class="{ 'level-row__drift--bad': !delayCheckOf(fixture.id)?.ok }"
+              >
+                {{ hasNextCue ? `上限 ${formatSeconds(delayLimitSec ?? 0)}` : '末条不限' }}
+              </span>
+            </div>
+
             <NInput
               :value="focusValue(fixture.id)"
               size="small"
@@ -316,6 +410,14 @@ function goSheets(): void {
               @keyup.enter="commitFocus(fixture.id)"
             />
           </div>
+
+          <p
+            v-for="fixture in fixtures.filter((item) => isEnabled(item.id) && !delayCheckOf(item.id)?.ok)"
+            :key="`${fixture.id}-delay-error`"
+            class="level-row__delay-error"
+          >
+            CH{{ fixture.channel }}：{{ delayCheckOf(fixture.id)?.message }}
+          </p>
         </div>
       </section>
 
@@ -378,7 +480,7 @@ function goSheets(): void {
 .level-table__head,
 .level-row {
   display: grid;
-  grid-template-columns: 58px 220px 240px 220px 1fr;
+  grid-template-columns: 58px 220px 220px 210px 180px 1fr;
   align-items: center;
   gap: 12px;
   padding: 9px 4px;
@@ -393,6 +495,30 @@ function goSheets(): void {
 .level-row {
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   transition: opacity 0.16s ease;
+}
+
+.level-row__delay {
+  flex-wrap: nowrap;
+}
+
+.level-row__delay-suffix {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.level-row__delay-error {
+  margin: 2px 4px 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #ff9a9a;
+  background: rgba(232, 84, 84, 0.1);
+  border: 1px solid rgba(232, 84, 84, 0.32);
+}
+
+.level-row__drift--bad {
+  color: #ff9a9a;
 }
 
 .level-row--off {

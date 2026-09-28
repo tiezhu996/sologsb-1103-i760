@@ -4,6 +4,7 @@ import type { RehearsalSheet, SheetChannelLine, SheetCueLine, SheetDraft } from 
 import { db } from '@/utils/db'
 import { createId } from '@/utils/id'
 import { sortFixturesByChannel } from '@/utils/patch'
+import { maxTurnOnDelay, normalizeDelaySec } from '@/utils/fade'
 import { useCueStore } from '@/stores/cueStore'
 import { useFixtureStore } from '@/stores/fixtureStore'
 import { useLevelStore } from '@/stores/levelStore'
@@ -61,6 +62,7 @@ export const useSheetStore = defineStore('sheet', () => {
     if (ordered.length === 0) return null
 
     const cueLines: SheetCueLine[] = ordered.map((cue) => {
+      const cueLevels = levelStore.levelsOfCue(cue.id)
       const channels: SheetChannelLine[] = sortFixturesByChannel(fixtureStore.fixturesOfSession(draft.sessionId))
         .map((fixture) => {
           const level = levelStore.levelOf(cue.id, fixture.id)
@@ -72,6 +74,7 @@ export const useSheetStore = defineStore('sheet', () => {
             gel: fixture.gel,
             intensity: level.intensity,
             colorTempK: level.colorTempK,
+            turnOnDelaySec: normalizeDelaySec(level.turnOnDelaySec),
             focusNote: level.focusNote
           }
         })
@@ -85,6 +88,7 @@ export const useSheetStore = defineStore('sheet', () => {
         fadeInSec: cue.fadeInSec,
         fadeOutSec: cue.fadeOutSec,
         holdSec: cue.holdSec,
+        maxTurnOnDelaySec: maxTurnOnDelay(cueLevels),
         note: cue.note,
         channels
       }

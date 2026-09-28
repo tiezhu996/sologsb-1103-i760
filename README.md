@@ -38,13 +38,13 @@ docker compose up -d --build    # 改动代码后重新构建
 
 | 路由 | 页面 | 主要能力 | 消费模型 |
 | --- | --- | --- | --- |
-| `/sessions` | 场次编排 | 新建场次、上下调序、查看每场 Cue 数与过渡总时长、硬切衔接预警 | Session、Cue |
+| `/sessions` | 场次编排 | 新建场次、上下调序、查看每场 Cue 数与总时长（含开灯延迟）、硬切衔接预警 | Session、Cue |
 | `/sessions/:id/fixtures` | 灯位通道配置台 | 通道号排布、按灯位分组折叠、重复通道号高亮、灯位负载校验 | Fixture、Session |
-| `/sessions/:id/cues` | Cue 编排时间轴 | 插入 / 复制 / 删除 Cue、拖拽调整先后、沿袭上一条参数、批量偏移过渡时间 | Cue、CueLevel |
-| `/cues/:id/levels` | 通道电平编辑 | 逐通道设定亮度与色温、色温漂移检查、一键对齐基准色温 | CueLevel、Fixture |
-| `/sheets` | 排演表生成与导出 | 勾选 Cue 组表、本地留存历史、预览 / 复制 / 下载纯文本 | RehearsalSheet、Cue |
+| `/sessions/:id/cues` | Cue 编排时间轴 | 插入 / 复制 / 删除 Cue、拖拽调整先后、沿袭上一条参数、批量偏移过渡时间、开灯延迟越限预警 | Cue、CueLevel |
+| `/cues/:id/levels` | 通道电平编辑 | 逐通道设定亮度、色温与开灯延迟、延迟越过下一条触发点当场拒绝、色温漂移检查 | CueLevel、Fixture |
+| `/sheets` | 排演表生成与导出 | 勾选 Cue 组表、本地留存历史、预览 / 复制 / 下载纯文本（逐条含开灯延迟快照） | RehearsalSheet、Cue |
 
-核心动作闭环：**建场次 → 配灯位通道 → 插入 Cue → 设定过渡与通道电平 → 导出排演表**。
+核心动作闭环：**建场次 → 配灯位通道 → 插入 Cue → 设定过渡与通道电平（含开灯延迟）→ 导出排演表**。
 
 ## 四、本地开发
 
@@ -81,7 +81,7 @@ sologsb-1103/
         │   ├── sessionStore.ts  cueStore.ts  fixtureStore.ts
         │   ├── levelStore.ts    sheetStore.ts
         ├── components/common/      # 共享组件
-        │   ├── FadeBar.vue      # 渐变条：渐亮/保持/渐暗按比例绘制
+        │   ├── FadeBar.vue      # 渐变条：开灯等待/渐亮/保持/渐暗按比例绘制
         │   ├── ChannelChip.vue  # 通道标签：通道号 + 灯位色块 + 亮度百分比
         │   ├── BlankHint.vue    # 空态引导与新建入口
         │   └── CueNoInput.vue   # Cue 编号输入与重号校验（支持 Q12.5）
@@ -105,7 +105,8 @@ sologsb-1103/
 
 - 所有数据存放在**浏览器本地 IndexedDB**，数据库名 `gbcuesheet`，由 `src/utils/db.ts` 用 Dexie 统一封装；页面不直接读写数据库，只调用 store 的 action。
 - 共 6 张表：`sessions`、`fixtures`、`cues`、`levels`、`sheets`、`appMeta`（元数据）。
-- **数据结构版本号**：`DB_VERSION = 2`。`version(1)` 定义初始结构；`version(2)` 新增 `updatedAt` / `sheetNo` 索引、`appMeta` 表，并在 `upgrade()` 中迁移既有数据（补齐 `updatedAt`、`orderIndex`、`holdSec`，规范化遗留排演表编号与条目快照）。
+- **数据结构版本号**：`DB_VERSION = 3`。`version(1)` 定义初始结构；`version(2)` 新增 `updatedAt` / `sheetNo` 索引、`appMeta` 表，并在 `upgrade()` 中迁移既有数据（补齐 `updatedAt`、`orderIndex`、`holdSec`，规范化遗留排演表编号与条目快照）；`version(3)` 为通道电平新增开灯延迟 `turnOnDelaySec`，并为历史排演表快照补齐通道延迟与每条 Cue 的最大延迟（旧数据一律按 0 秒）。
+- **开灯延迟**（`CueLevel.turnOnDelaySec`）：Cue 触发后先等待若干秒该通道才开始渐亮，用于技术合成时按通道依次亮起。通道开灯（渐亮+保持）结束时刻 = 延迟 + 渐亮 + 保持，下一条 Cue 触发时刻 = 本条渐亮 + 保持 + 渐暗，故非末条 Cue 的延迟上限为本条渐暗时长；超过会在编辑时当场提示并拒绝保存，末条 Cue 不设上限。时间轴过渡条、场次卡片与排演表总时长均按**每条 Cue 最晚结束通道**（基础过渡 + 该条最大延迟）计算。
 - 删除场次会级联清理其灯位通道、Cue、通道电平与排演表；删除通道会清理对应的电平记录。
 - **容器无状态**：不使用数据库服务、不挂载命名卷；换浏览器或清理站点数据即等于清空。排演表以生成时刻的快照留档，之后修改 Cue 不影响历史记录。
 

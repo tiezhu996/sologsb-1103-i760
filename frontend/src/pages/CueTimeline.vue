@@ -23,7 +23,12 @@ import { useLevelStore } from '@/stores/levelStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { CUE_TRIGGERS, type Cue, type CueTrigger } from '@/types/cue'
 import type { FixturePosition } from '@/types/fixture'
-import { cueTotalSeconds, formatSeconds, formatTransition } from '@/utils/fade'
+import {
+  cueDurationSeconds,
+  formatSeconds,
+  formatTransition,
+  maxTurnOnDelay
+} from '@/utils/fade'
 import { isValidCueNo, normalizeCueNo } from '@/utils/cueOrder'
 
 const route = useRoute()
@@ -38,7 +43,7 @@ const levelStore = useLevelStore()
 const sessionId = computed(() => String(route.params.id ?? ''))
 const session = computed(() => sessionStore.sessionById(sessionId.value))
 
-const { cues, summary, nextCueNo, hardCutCount, reorder } = useCueOrder(sessionId)
+const { cues, summary, nextCueNo, hardCutCount, delayViolations, reorder } = useCueOrder(sessionId)
 
 const triggerOptions = CUE_TRIGGERS.map((trigger) => ({ label: trigger, value: trigger }))
 const scopeOptions = [
@@ -73,6 +78,33 @@ function channelsOfCue(cueId: string): CueChannelChip[] {
     })
   })
   return chips.sort((a, b) => a.channel - b.channel)
+}
+
+/** 一条 Cue 下最晚结束通道的开灯延迟（秒） */
+function maxDelayOf(cueId: string): number {
+  return maxTurnOnDelay(levelStore.levelsOfCue(cueId))
+}
+
+/** 越限延迟列表（带通道号，用于顶部预警） */
+const delayViolationRows = computed(() =>
+  delayViolations.value.map((violation) => ({
+    ...violation,
+    channel: fixtureStore.fixtureById(violation.fixtureId)?.channel ?? null
+  }))
+)
+
+/** 非末条 Cue 的渐暗不得小于已有通道延迟，否则最晚通道会越过下一条触发点 */
+function fadeOutBlockedByDelay(cue: Cue, nextFadeOut: number): string | null {
+  const index = cues.value.findIndex((item) => item.id === cue.id)
+  const hasNext = index >= 0 && index < cues.value.length - 1
+  if (!hasNext) return null
+  const maxDelay = maxDelayOf(cue.id)
+  if (nextFadeOut + 0.05 < maxDelay) {
+    return `${cue.cueNo} 已有通道开灯延迟 ${formatSeconds(
+      maxDelay
+    )}，渐暗不能低于 ${formatSeconds(maxDelay)}，请先到电平编辑缩短该通道延迟`
+  }
+  return null
 }
 
 /* ---------------- 新增 Cue ---------------- */
@@ -195,6 +227,13 @@ type FadeField = 'fadeInSec' | 'fadeOutSec' | 'holdSec'
 async function commitFade(cue: Cue, field: FadeField, value: number | null): Promise<void> {
   const next = Math.max(0, value ?? 0)
   if (next === cue[field]) return
+  if (field === 'fadeOutSec') {
+    const blocked = fadeOutBlockedByDelay(cue, next)
+    if (blocked) {
+      message.error(blocked)
+      return
+    }
+  }
   const patch: CuePatch = {}
   if (field === 'fadeInSec') patch.fadeInSec = next
   else if (field === 'fadeOutSec') patch.fadeOutSec = next
@@ -306,11 +345,19 @@ function goSheets(): void {
 }
 
 function durationOf(cue: Cue): string {
-  return formatSeconds(cueTotalSeconds(cue))
+  return formatSeconds(cueDurationSeconds(cue, maxDelayOf(cue.id)))
 }
 
 function transitionOf(cue: Cue): string {
-  return formatTransition(cue)
+  return formatTransition(cue, maxDelayOf(cue.id))
+}
+
+function delayOfText(cue: Cue): string {
+  return formatSeconds(maxDelayOf(cue.id))
+}
+
+function isLastCue(index: number): boolean {
+  return index === cues.value.length - 1
 }
 
 function channelFilterDuplicate(fixtureId: string): boolean {
@@ -379,7 +426,22 @@ function channelFilterDuplicate(fixtureId: string): boolean {
             :fade-in-sec="summary.totalFadeInSec"
             :hold-sec="summary.totalHoldSec"
             :fade-out-sec="summary.totalFadeOutSec"
+            :turn-on-delay-sec="summary.totalTurnOnDelaySec"
           />
+        </div>
+
+        <div v-if="delayViolationRows.length > 0" class="delay-alert">
+          <p class="delay-alert__title">
+            {{ delayViolationRows.length }} 处开灯延迟会越过下一条 Cue 触发点（保存时会被拒绝）：
+          </p>
+          <p v-for="item in delayViolationRows" :key="`${item.cueId}-${item.fixtureId}`" class="delay-alert__item mono">
+            {{ item.cueNo }} CH{{ item.channel ?? '?' }}：延迟 {{ formatSeconds(item.delaySec) }}，上限
+            {{ formatSeconds(item.limitSec) }}
+          </p>
+        </div>
+
+        <div v-if="summary.totalTurnOnDelaySec > 0" class="delay-summary">
+          各条最晚通道开灯延迟合计 {{ formatSeconds(summary.totalTurnOnDelaySec) }}（已计入过渡总时长）
         </div>
 
         <div v-if="summary.adjacent.length > 0" class="adjacent">
@@ -446,6 +508,13 @@ function channelFilterDuplicate(fixtureId: string): boolean {
               <NButton size="tiny" type="primary" ghost @click="goLevels(cue.id)">
                 电平编辑（{{ levelStore.levelsOfCue(cue.id).length }}）
               </NButton>
+              <span
+                v-if="maxDelayOf(cue.id) > 0"
+                class="cue-row__delay-tag mono"
+                :title="isLastCue(index) ? '末条 Cue，延迟不设上限' : '最晚通道开灯延迟'"
+              >
+                开灯延迟 {{ delayOfText(cue) }}
+              </span>
             </div>
 
             <div class="cue-row__body">
@@ -492,10 +561,14 @@ function channelFilterDuplicate(fixtureId: string): boolean {
                 :fade-in-sec="cue.fadeInSec"
                 :hold-sec="cue.holdSec"
                 :fade-out-sec="cue.fadeOutSec"
+                :turn-on-delay-sec="maxDelayOf(cue.id)"
                 :height="14"
                 compact
               />
 
+              <span v-if="maxDelayOf(cue.id) > 0" class="cue-row__delay mono" title="最晚通道的开灯延迟">
+                等待 {{ delayOfText(cue) }}
+              </span>
               <span class="cue-row__total mono">{{ durationOf(cue) }}</span>
             </div>
 
@@ -633,6 +706,33 @@ function channelFilterDuplicate(fixtureId: string): boolean {
   color: #ffbdbd;
 }
 
+.delay-alert {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(232, 84, 84, 0.08);
+  border: 1px solid rgba(232, 84, 84, 0.28);
+}
+
+.delay-alert__title {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: #ff9a9a;
+}
+
+.delay-alert__item {
+  margin: 0;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.72);
+  line-height: 1.8;
+}
+
+.delay-summary {
+  margin-top: 10px;
+  font-size: 12px;
+  color: rgba(122, 168, 255, 0.85);
+}
+
 .cue-list {
   display: flex;
   flex-direction: column;
@@ -737,6 +837,20 @@ function channelFilterDuplicate(fixtureId: string): boolean {
 .cue-row__total {
   font-size: 13px;
   color: #f2b544;
+}
+
+.cue-row__delay {
+  font-size: 12px;
+  color: #7aa8ff;
+}
+
+.cue-row__delay-tag {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: #9cbcff;
+  background: rgba(122, 168, 255, 0.12);
+  border: 1px solid rgba(122, 168, 255, 0.32);
 }
 
 .cue-row__foot {

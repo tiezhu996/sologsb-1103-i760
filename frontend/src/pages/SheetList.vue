@@ -17,8 +17,16 @@ import BlankHint from '@/components/common/BlankHint.vue'
 import { useCueStore } from '@/stores/cueStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useSheetStore } from '@/stores/sheetStore'
+import { useLevelStore } from '@/stores/levelStore'
 import type { RehearsalSheet } from '@/types/sheet'
-import { buildSheetText, cueTotalSeconds, formatDateTime, formatSeconds } from '@/utils/fade'
+import {
+  buildSheetText,
+  cueDurationSeconds,
+  formatDateTime,
+  formatSeconds,
+  maxTurnOnDelay,
+  normalizeDelaySec
+} from '@/utils/fade'
 import { buildSheetFilename, copyText, downloadTextFile } from '@/utils/export'
 
 const router = useRouter()
@@ -26,6 +34,7 @@ const message = useMessage()
 const dialog = useDialog()
 const sessionStore = useSessionStore()
 const cueStore = useCueStore()
+const levelStore = useLevelStore()
 const sheetStore = useSheetStore()
 
 const showAllSessions = ref(false)
@@ -104,10 +113,22 @@ function cueNoSummary(sheet: RehearsalSheet): string {
 
 function totalOf(sheet: RehearsalSheet): string {
   const total = sheet.cueLines.reduce(
-    (sum, line) => sum + cueTotalSeconds({ fadeInSec: line.fadeInSec, holdSec: line.holdSec, fadeOutSec: line.fadeOutSec }),
+    (sum, line) =>
+      sum +
+      cueDurationSeconds(
+        { fadeInSec: line.fadeInSec, holdSec: line.holdSec, fadeOutSec: line.fadeOutSec },
+        normalizeDelaySec(line.maxTurnOnDelaySec)
+      ),
     0
   )
   return formatSeconds(total)
+}
+
+/** 勾选列表里单条 Cue 的总时长（含其最晚通道延迟） */
+function cueDurationText(cueId: string): string {
+  const cue = cueStore.cueById(cueId)
+  if (!cue) return '—'
+  return formatSeconds(cueDurationSeconds(cue, maxTurnOnDelay(levelStore.levelsOfCue(cueId))))
 }
 
 async function handleCopy(sheet: RehearsalSheet): Promise<void> {
@@ -207,7 +228,7 @@ function goSessions(): void {
             <span class="cue-select__no mono">{{ cue.cueNo }}</span>
             <span class="cue-select__label">{{ cue.label || '（未填写提示语）' }}</span>
             <NTag size="tiny" :bordered="false">{{ cue.trigger }}</NTag>
-            <span class="cue-select__duration mono">{{ formatSeconds(cueTotalSeconds(cue)) }}</span>
+            <span class="cue-select__duration mono">{{ cueDurationText(cue.id) }}</span>
           </label>
         </div>
 

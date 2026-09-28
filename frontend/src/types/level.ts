@@ -12,6 +12,11 @@ export interface CueLevel {
   intensity: number
   /** 色温（K） */
   colorTempK: number
+  /**
+   * 开灯延迟（秒）：Cue 触发后先等待该时长，通道才开始渐亮，
+   * 用于技术合成时按通道依次亮起。旧数据缺省按 0 秒处理。
+   */
+  turnOnDelaySec: number
   /** 对焦说明 */
   focusNote: string
   updatedAt: number
@@ -48,3 +53,8 @@ export const COLOR_TEMP_TOLERANCE_K = 400
 /** 亮度取值范围 */
 export const INTENSITY_MIN = 0
 export const INTENSITY_MAX = 100
+
+/** 开灯延迟取值范围（秒） */
+export const TURN_ON_DELAY_MIN = 0
+export const TURN_ON_DELAY_MAX = 3600
+export const TURN_ON_DELAY_STEP = 0.5
