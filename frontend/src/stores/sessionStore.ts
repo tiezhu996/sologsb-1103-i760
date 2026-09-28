@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 import type { Session, SessionDraft, SessionStat } from '@/types/session'
 import { db } from '@/utils/db'
 import { createId } from '@/utils/id'
-import { sumCues } from '@/utils/fade'
+import { sumCues, maxDelayOfCue } from '@/utils/fade'
 import { useCueStore } from '@/stores/cueStore'
 import { useFixtureStore } from '@/stores/fixtureStore'
 import { useLevelStore } from '@/stores/levelStore'
@@ -37,11 +37,16 @@ export const useSessionStore = defineStore('session', () => {
   function statOf(sessionId: string): SessionStat {
     const cueStore = useCueStore()
     const fixtureStore = useFixtureStore()
+    const levelStore = useLevelStore()
     if (!sessionById(sessionId)) return emptyStat()
     const cues = cueStore.cuesOfSession(sessionId)
+    // 场次卡片总时长按每条 Cue 最晚结束的通道计（含开灯延迟）
+    const maxDelayByCue = new Map<string, number>(
+      cues.map((cue) => [cue.id, maxDelayOfCue(levelStore.levelsOfCue(cue.id))])
+    )
     return {
       cueCount: cues.length,
-      totalFadeSec: sumCues(cues).totalSec,
+      totalFadeSec: sumCues(cues, maxDelayByCue).totalSec,
       fixtureCount: fixtureStore.fixturesOfSession(sessionId).length
     }
   }

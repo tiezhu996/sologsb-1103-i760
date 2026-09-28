@@ -45,6 +45,93 @@ export function cueTotalSeconds(cue: Pick<Cue, 'fadeInSec' | 'fadeOutSec' | 'hol
   return round1(cue.fadeInSec + cue.holdSec + cue.fadeOutSec)
 }
 
+/** 某条 Cue 已设定电平通道里最大的开灯延迟（秒）；未设定通道时为 0 */
+export function maxDelayOfCue(levels: ReadonlyArray<{ delaySec?: number }>): number {
+  return levels.reduce((max, level) => Math.max(max, normalizedDelay(level.delaySec)), 0)
+}
+
+/** 归一化开灯延迟：旧数据没有该字段时按 0 秒处理，保留一位小数且不小于 0 */
+export function normalizedDelay(value: number | null | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0
+  return round1(Math.max(0, value))
+}
+
+/**
+ * 一条 Cue 的实际总时长：最晚结束通道的开灯延迟把渐亮段整体后移，
+ * 保持 / 渐暗仍沿 Cue 统一时间轴，因此为「基础时长 + 最晚通道延迟」。
+ */
+export function cueEffectiveSeconds(
+  cue: Pick<Cue, 'fadeInSec' | 'fadeOutSec' | 'holdSec'>,
+  levels: ReadonlyArray<{ delaySec?: number }>
+): number {
+  return round1(cueTotalSeconds(cue) + maxDelayOfCue(levels))
+}
+
+/**
+ * 非末条 Cue 的允许开灯延迟上限：
+ * 下一条 Cue 在本条「渐亮 + 保持 + 渐暗」结束时触发，
+ * 通道须在下一条触发前完成渐亮（延迟 + 渐亮 ≤ 下一条触发时刻），
+ * 故上限为「保持 + 渐暗」。末条 Cue 没有下一条触发点，返回 null（不限制）。
+ */
+export function delayLimitOfCue(
+  cue: Pick<Cue, 'fadeInSec' | 'fadeOutSec' | 'holdSec'>,
+  nextCue: Pick<Cue, 'id'> | null | undefined
+): number | null {
+  if (!nextCue) return null
+  return round1(cue.holdSec + cue.fadeOutSec)
+}
+
+/** 开灯延迟校验输入 */
+export interface DelayViolationInput {
+  cue: Pick<Cue, 'id' | 'cueNo' | 'fadeInSec' | 'fadeOutSec' | 'holdSec'>
+  /** 时间轴上的下一条 Cue；末条传 null / undefined 表示无上限 */
+  nextCue?: Pick<Cue, 'id' | 'cueNo'> | null
+  /** 该 Cue 下的通道电平（含待保存通道的拟设延迟） */
+  levels: ReadonlyArray<{ fixtureId: string; channel?: number; delaySec?: number }>
+  /** 待保存通道；传入时以其覆盖 levels 中的同通道延迟 */
+  pending?: { fixtureId: string; channel: number; delaySec?: number }
+}
+
+/** 开灯延迟越界的单个通道 */
+export interface DelayViolation {
+  fixtureId: string
+  channel: number
+  delaySec: number
+  /** 允许上限（秒）；末条 Cue 不会产生越界 */
+  limitSec: number
+}
+
+/**
+ * 校验一组通道延迟是否会把开灯结束时刻（延迟 + 渐亮）推过下一条 Cue 触发点。
+ * 返回越界通道列表；末条 Cue 恒为空（无下一条触发约束）。
+ */
+export function findDelayViolations(input: DelayViolationInput): DelayViolation[] {
+  const limit = delayLimitOfCue(input.cue, input.nextCue ?? null)
+  if (limit === null) return []
+
+  const pending = input.pending ?? null
+  const pendingMap = new Map<string, number>()
+  if (pending) pendingMap.set(pending.fixtureId, normalizedDelay(pending.delaySec))
+
+  const violations: DelayViolation[] = []
+  input.levels.forEach((level) => {
+    const delay = pendingMap.has(level.fixtureId) ? pendingMap.get(level.fixtureId)! : normalizedDelay(level.delaySec)
+    if (round1(delay + input.cue.fadeInSec) > limit + 1e-6) {
+      const channel = pending?.fixtureId === level.fixtureId ? pending.channel : level.channel ?? 0
+      violations.push({ fixtureId: level.fixtureId, channel, delaySec: delay, limitSec: limit })
+    }
+  })
+
+  // 待保存通道可能是尚未建立电平记录的新通道
+  if (pending && !input.levels.some((level) => level.fixtureId === pending.fixtureId)) {
+    const delay = pendingMap.get(pending.fixtureId)!
+    if (round1(delay + input.cue.fadeInSec) > limit + 1e-6) {
+      violations.push({ fixtureId: pending.fixtureId, channel: pending.channel, delaySec: delay, limitSec: limit })
+    }
+  }
+  return violations
+}
+
 /** 单条 Cue 的过渡描述文本 */
 export function formatTransition(cue: Pick<Cue, 'fadeInSec' | 'fadeOutSec' | 'holdSec'>): string {
   return `渐亮 ${formatSeconds(cue.fadeInSec)} → 保持 ${formatSeconds(cue.holdSec)} → 渐暗 ${formatSeconds(cue.fadeOutSec)}`
@@ -61,18 +148,23 @@ export function fadeRatio(input: Pick<Cue, 'fadeInSec' | 'holdSec' | 'fadeOutSec
   }
 }
 
-/** 汇总一组 Cue 的过渡时长，并给出相邻衔接关系 */
-export function sumCues(input: readonly Cue[]): CueOrderSummary {
+/**
+ * 汇总一组 Cue 的过渡时长，并给出相邻衔接关系。
+ * `maxDelayByCue` 传入每条 Cue 最晚通道的开灯延迟；总时长按最晚结束的通道计。
+ */
+export function sumCues(input: readonly Cue[], maxDelayByCue?: ReadonlyMap<string, number>): CueOrderSummary {
   const cues = sortCues(input)
   let totalFadeInSec = 0
   let totalFadeOutSec = 0
   let totalHoldSec = 0
+  let totalDelaySec = 0
   const adjacent: AdjacentTransition[] = []
 
   cues.forEach((cue, index) => {
     totalFadeInSec += cue.fadeInSec
     totalFadeOutSec += cue.fadeOutSec
     totalHoldSec += cue.holdSec
+    totalDelaySec += normalizedDelay(maxDelayByCue?.get(cue.id))
     if (index === 0) return
     const previous = cues[index - 1]
     const gapSec = round1(previous.fadeOutSec + cue.fadeInSec)
@@ -90,7 +182,8 @@ export function sumCues(input: readonly Cue[]): CueOrderSummary {
     totalFadeInSec: round1(totalFadeInSec),
     totalFadeOutSec: round1(totalFadeOutSec),
     totalHoldSec: round1(totalHoldSec),
-    totalSec: round1(totalFadeInSec + totalFadeOutSec + totalHoldSec),
+    totalDelaySec: round1(totalDelaySec),
+    totalSec: round1(totalFadeInSec + totalFadeOutSec + totalHoldSec + totalDelaySec),
     adjacent
   }
 }
@@ -143,12 +236,13 @@ export function checkColorTempConsistency(
 
 /** 把一条 Cue 快照渲染为多行文本 */
 function formatCueLineText(line: SheetCueLine, index: number): string[] {
-  const total = round1(line.fadeInSec + line.holdSec + line.fadeOutSec)
+  const maxDelay = maxDelayOfCue(line.channels)
+  const total = round1(line.fadeInSec + line.holdSec + line.fadeOutSec + maxDelay)
   const rows: string[] = []
   rows.push(`${String(index + 1).padStart(2, '0')}. ${line.cueNo}  ${line.label || '（无提示语）'}  [${line.trigger}]`)
   rows.push(`    过渡：渐亮 ${formatSeconds(line.fadeInSec)} / 保持 ${formatSeconds(line.holdSec)} / 渐暗 ${formatSeconds(
     line.fadeOutSec
-  )}（合计 ${formatSeconds(total)}）`)
+  )}（合计 ${formatSeconds(total)}${maxDelay > 0 ? `，含最晚开灯延迟 ${formatSeconds(maxDelay)}` : ''}）`)
   if (line.note) rows.push(`    备注：${line.note}`)
   if (line.channels.length === 0) {
     rows.push('    通道电平：未设定')
@@ -157,6 +251,7 @@ function formatCueLineText(line: SheetCueLine, index: number): string[] {
       rows.push(
         `    CH${String(channel.channel).padStart(3, ' ')} ${channel.position}/${channel.fixtureType}` +
           ` 亮度 ${channel.intensity}%  色温 ${channel.colorTempK}K  色纸 ${channel.gel || '—'}` +
+          `  开灯延迟 ${formatSeconds(normalizedDelay(channel.delaySec))}` +
           (channel.focusNote ? `  对焦：${channel.focusNote}` : '')
       )
     })
@@ -186,6 +281,7 @@ export function buildSheetText(sheet: RehearsalSheet, session?: Session): string
     const totalFadeIn = round1(cueLike.reduce((sum, cue) => sum + cue.fadeInSec, 0))
     const totalHold = round1(cueLike.reduce((sum, cue) => sum + cue.holdSec, 0))
     const totalFadeOut = round1(cueLike.reduce((sum, cue) => sum + cue.fadeOutSec, 0))
+    const totalDelay = round1(sheet.cueLines.reduce((sum, line) => sum + maxDelayOfCue(line.channels), 0))
     sheet.cueLines.forEach((line, index) => {
       lines.push(...formatCueLineText(line, index))
     })
@@ -193,7 +289,9 @@ export function buildSheetText(sheet: RehearsalSheet, session?: Session): string
     lines.push(
       `合计过渡：渐亮 ${formatSeconds(totalFadeIn)} / 保持 ${formatSeconds(totalHold)} / 渐暗 ${formatSeconds(
         totalFadeOut
-      )}（总计 ${formatSeconds(round1(totalFadeIn + totalHold + totalFadeOut))}）`
+      )}（总计 ${formatSeconds(round1(totalFadeIn + totalHold + totalFadeOut + totalDelay))}${
+        totalDelay > 0 ? `，含开灯延迟 ${formatSeconds(totalDelay)}` : ''
+      }）`
     )
   }
 

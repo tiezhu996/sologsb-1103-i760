@@ -1,20 +1,27 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { CueLevel } from '@/types/level'
-import { INTENSITY_MAX, INTENSITY_MIN } from '@/types/level'
+import { DELAY_MIN_SEC, INTENSITY_MAX, INTENSITY_MIN } from '@/types/level'
 import { db } from '@/utils/db'
 import { createId } from '@/utils/id'
+import { normalizedDelay } from '@/utils/fade'
 
 /** 通道电平补丁 */
 export interface CueLevelPatch {
   intensity?: number
   colorTempK?: number
+  delaySec?: number
   focusNote?: string
 }
 
 function clampIntensity(value: number): number {
   if (!Number.isFinite(value)) return 0
   return Math.min(INTENSITY_MAX, Math.max(INTENSITY_MIN, Math.round(value)))
+}
+
+/** 归一化开灯延迟，保留一位小数且不小于 0；旧数据缺字段时按 0 处理 */
+function clampDelay(value: number | null | undefined): number {
+  return Math.max(DELAY_MIN_SEC, normalizedDelay(value))
 }
 
 /**
@@ -54,7 +61,9 @@ export const useLevelStore = defineStore('level', () => {
   }
 
   async function hydrate(): Promise<void> {
-    levels.value = await db.levels.toArray()
+    const stored = await db.levels.toArray()
+    // 旧数据没有 delaySec 字段时按 0 秒处理
+    levels.value = stored.map((level) => ({ ...level, delaySec: clampDelay(level.delaySec) }))
     hydrated.value = true
   }
 
@@ -66,6 +75,7 @@ export const useLevelStore = defineStore('level', () => {
         ...existing,
         intensity: patch.intensity === undefined ? existing.intensity : clampIntensity(patch.intensity),
         colorTempK: patch.colorTempK === undefined ? existing.colorTempK : Math.round(patch.colorTempK),
+        delaySec: patch.delaySec === undefined ? clampDelay(existing.delaySec) : clampDelay(patch.delaySec),
         focusNote: patch.focusNote === undefined ? existing.focusNote : patch.focusNote,
         updatedAt: now
       }
@@ -79,6 +89,7 @@ export const useLevelStore = defineStore('level', () => {
       fixtureId,
       intensity: clampIntensity(patch.intensity ?? 0),
       colorTempK: Math.round(patch.colorTempK ?? 3200),
+      delaySec: clampDelay(patch.delaySec),
       focusNote: patch.focusNote ?? '',
       updatedAt: now
     }

@@ -1,8 +1,9 @@
 import { computed, toValue, type ComputedRef, type MaybeRefOrGetter } from 'vue'
 import type { Cue, CueOrderSummary } from '@/types/cue'
 import { useCueStore } from '@/stores/cueStore'
+import { useLevelStore } from '@/stores/levelStore'
 import { sortCues, suggestNextCueNo } from '@/utils/cueOrder'
-import { sumCues, formatSeconds, cueTotalSeconds } from '@/utils/fade'
+import { sumCues, formatSeconds, cueEffectiveSeconds, maxDelayOfCue } from '@/utils/fade'
 
 /** `useCueOrder` 暴露的顺序视图与重排动作 */
 export interface UseCueOrderReturn {
@@ -32,10 +33,18 @@ export interface UseCueOrderReturn {
  */
 export function useCueOrder(sessionId: MaybeRefOrGetter<string>): UseCueOrderReturn {
   const cueStore = useCueStore()
+  const levelStore = useLevelStore()
 
   const cues = computed<Cue[]>(() => sortCues(cueStore.cuesOfSession(toValue(sessionId))))
 
-  const summary = computed<CueOrderSummary>(() => sumCues(cues.value))
+  /** 每条 Cue 最晚通道的开灯延迟，总时长按最晚结束的通道计 */
+  const maxDelayByCue = computed<Map<string, number>>(() => {
+    const map = new Map<string, number>()
+    cues.value.forEach((cue) => map.set(cue.id, maxDelayOfCue(levelStore.levelsOfCue(cue.id))))
+    return map
+  })
+
+  const summary = computed<CueOrderSummary>(() => sumCues(cues.value, maxDelayByCue.value))
 
   const totalSeconds = computed(() => summary.value.totalSec)
 
@@ -44,7 +53,7 @@ export function useCueOrder(sessionId: MaybeRefOrGetter<string>): UseCueOrderRet
   const hardCutCount = computed(() => summary.value.adjacent.filter((item) => item.overlap).length)
 
   function durationTextOf(cue: Cue): string {
-    return formatSeconds(cueTotalSeconds(cue))
+    return formatSeconds(cueEffectiveSeconds(cue, levelStore.levelsOfCue(cue.id)))
   }
 
   async function reorder(orderedIds: readonly string[]): Promise<void> {

@@ -11,8 +11,17 @@ import { useFixtureStore } from '@/stores/fixtureStore'
 import { useLevelStore } from '@/stores/levelStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import type { Fixture, FixturePosition } from '@/types/fixture'
-import { COLOR_TEMP_MAX, COLOR_TEMP_MIN, COLOR_TEMP_STEP } from '@/types/level'
-import { cueTotalSeconds, checkColorTempConsistency, formatSeconds, formatTransition } from '@/utils/fade'
+import { COLOR_TEMP_MAX, COLOR_TEMP_MIN, COLOR_TEMP_STEP, DELAY_MIN_SEC, DELAY_STEP_SEC } from '@/types/level'
+import {
+  cueEffectiveSeconds,
+  checkColorTempConsistency,
+  delayLimitOfCue,
+  findDelayViolations,
+  formatSeconds,
+  formatTransition,
+  maxDelayOfCue,
+  normalizedDelay
+} from '@/utils/fade'
 import { normalizeCueNo } from '@/utils/cueOrder'
 
 const route = useRoute()
@@ -140,6 +149,73 @@ async function commitCueNo(value: string): Promise<void> {
 
 const siblingCues = computed(() => (sessionId.value ? cueStore.sortedCuesOfSession(sessionId.value) : []))
 
+/** 时间轴上的下一条 Cue：它在本条基础时长结束时触发；末条为 null */
+const nextCue = computed(() => {
+  if (!cue.value) return null
+  const ordered = siblingCues.value
+  const index = ordered.findIndex((item) => item.id === cue.value?.id)
+  return index >= 0 && index + 1 < ordered.length ? ordered[index + 1] : null
+})
+
+/** 非末条 Cue 的开灯延迟上限（保持 + 渐暗）；末条无上限 */
+const delayLimit = computed<number | null>(() => (cue.value ? delayLimitOfCue(cue.value, nextCue.value) : null))
+
+/** 本 Cue 最晚结束通道的开灯延迟，决定总时长与过渡条 */
+const maxDelay = computed(() => maxDelayOfCue(levels.value))
+
+const effectiveTotal = computed(() =>
+  cue.value ? cueEffectiveSeconds(cue.value, levels.value) : 0
+)
+
+/** 当前已存在的越界通道（例如改过过渡时间后历史延迟超了新上限） */
+const existingViolations = computed(() => {
+  if (!cue.value) return []
+  return findDelayViolations({
+    cue: cue.value,
+    nextCue: nextCue.value,
+    levels: levels.value.map((level) => {
+      const fixture = fixtureStore.fixtureById(level.fixtureId)
+      return { fixtureId: level.fixtureId, channel: fixture?.channel, delaySec: level.delaySec }
+    })
+  })
+})
+
+const violatingFixtureIds = computed(() => new Set(existingViolations.value.map((item) => item.fixtureId)))
+
+function delayOf(fixtureId: string): number {
+  return normalizedDelay(levelStore.levelOf(cueId.value, fixtureId)?.delaySec)
+}
+
+function isDelayOver(fixtureId: string): boolean {
+  return violatingFixtureIds.value.has(fixtureId)
+}
+
+async function setDelay(fixture: Fixture, value: number | null): Promise<void> {
+  if (!cue.value) return
+  const next = Math.max(DELAY_MIN_SEC, normalizedDelay(value ?? 0))
+  const violations = findDelayViolations({
+    cue: cue.value,
+    nextCue: nextCue.value,
+    levels: levels.value.map((level) => {
+      const matched = fixtureStore.fixtureById(level.fixtureId)
+      return { fixtureId: level.fixtureId, channel: matched?.channel, delaySec: level.delaySec }
+    }),
+    pending: { fixtureId: fixture.id, channel: fixture.channel, delaySec: next }
+  })
+  if (violations.length > 0) {
+    const item = violations[0]
+    message.error(
+      nextCue.value
+        ? `CH${fixture.channel} 延迟 ${formatSeconds(item.delaySec)} + 渐亮 ${formatSeconds(
+            cue.value.fadeInSec
+          )} 会越过下一条 ${nextCue.value.cueNo} 的触发时刻，延迟最多 ${formatSeconds(item.limitSec)}，已拒绝保存`
+        : `CH${fixture.channel} 开灯延迟不合法，已拒绝保存`
+    )
+    return
+  }
+  await levelStore.upsertLevel(cueId.value, fixture.id, { delaySec: next })
+}
+
 function goSiblingCue(direction: -1 | 1): void {
   if (!cue.value) return
   const index = siblingCues.value.findIndex((item) => item.id === cue.value?.id)
@@ -191,7 +267,10 @@ function goSheets(): void {
           <CueNoInput :model-value="cue.cueNo" :existing-nos="siblingNos" width="130px" @commit="commitCueNo" />
           <div class="cue-head__titles">
             <p class="cue-head__label">{{ cue.label || '（未填写提示语）' }}</p>
-            <p class="cue-head__meta mono">{{ formatTransition(cue) }} · 合计 {{ formatSeconds(cueTotalSeconds(cue)) }}</p>
+            <p class="cue-head__meta mono">
+              {{ formatTransition(cue) }} · 合计 {{ formatSeconds(effectiveTotal)
+              }}<template v-if="maxDelay > 0">（含最晚开灯延迟 {{ formatSeconds(maxDelay) }}）</template>
+            </p>
           </div>
           <NTag size="small" :bordered="false" type="warning">{{ cue.trigger }}</NTag>
           <span class="toolbar__spacer" />
@@ -200,12 +279,33 @@ function goSheets(): void {
         </div>
 
         <div class="cue-head__bar">
-          <FadeBar :fade-in-sec="cue.fadeInSec" :hold-sec="cue.holdSec" :fade-out-sec="cue.fadeOutSec" :height="14" />
+          <FadeBar
+            :delay-sec="maxDelay"
+            :fade-in-sec="cue.fadeInSec"
+            :hold-sec="cue.holdSec"
+            :fade-out-sec="cue.fadeOutSec"
+            :height="14"
+          />
         </div>
+
+        <p class="cue-head__delay-tip">
+          <template v-if="delayLimit !== null">
+            开灯延迟上限 {{ formatSeconds(delayLimit) }}：通道须在下一条 {{ nextCue?.cueNo }}
+            触发前完成渐亮（延迟 + 渐亮 ≤ {{ formatSeconds(delayLimit) }}）；超限将拒绝保存。
+          </template>
+          <template v-else>末条 Cue 没有下一条触发点，延迟不设上限。</template>
+        </p>
       </section>
 
       <NAlert :type="tempCheck.consistent ? 'success' : 'warning'" :bordered="false">
         {{ tempCheck.message }}
+      </NAlert>
+
+      <NAlert v-if="existingViolations.length > 0" type="error" :bordered="false">
+        {{ existingViolations.length }} 个通道的开灯延迟会越过下一条 {{ nextCue?.cueNo }}
+        的触发时刻（上限 {{ formatSeconds(delayLimit ?? 0) }}）：
+        {{ existingViolations.map((item) => `CH${item.channel}（延迟 ${formatSeconds(item.delaySec)}）`).join('、') }}
+        ，请调小延迟或加大保持 / 渐暗时长。
       </NAlert>
 
       <div class="toolbar">
@@ -237,6 +337,7 @@ function goSheets(): void {
             <span>参与</span>
             <span>通道</span>
             <span>亮度</span>
+            <span>开灯延迟</span>
             <span>色温</span>
             <span>对焦说明</span>
           </div>
@@ -284,6 +385,26 @@ function goSheets(): void {
                 style="width: 82px"
                 @update:value="(value) => setIntensity(fixture.id, value ?? 0)"
               />
+            </div>
+
+            <div class="level-row__delay" :class="{ 'level-row__delay--over': isEnabled(fixture.id) && isDelayOver(fixture.id) }">
+              <NInputNumber
+                :value="delayOf(fixture.id)"
+                size="small"
+                :min="DELAY_MIN_SEC"
+                :max="delayLimit ?? undefined"
+                :step="DELAY_STEP_SEC"
+                :show-button="false"
+                :disabled="!isEnabled(fixture.id)"
+                style="width: 82px"
+                @update:value="(value) => setDelay(fixture, value)"
+              />
+              <span class="level-row__delay-hint mono">
+                <template v-if="!isEnabled(fixture.id)">未参与</template>
+                <template v-else-if="isDelayOver(fixture.id)">越过 {{ nextCue?.cueNo }}</template>
+                <template v-else-if="delayLimit !== null">≤ {{ formatSeconds(delayLimit) }}</template>
+                <template v-else>不限</template>
+              </span>
             </div>
 
             <div class="level-row__control">
@@ -370,6 +491,32 @@ function goSheets(): void {
   max-width: 620px;
 }
 
+.cue-head__delay-tip {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.level-row__delay {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.level-row__delay--over {
+  color: #ff9a9a;
+}
+
+.level-row__delay-hint {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.42);
+  white-space: nowrap;
+}
+
+.level-row__delay--over .level-row__delay-hint {
+  color: #ff9a9a;
+}
+
 .toolbar__label {
   font-size: 12px;
   color: rgba(255, 255, 255, 0.5);
@@ -378,7 +525,7 @@ function goSheets(): void {
 .level-table__head,
 .level-row {
   display: grid;
-  grid-template-columns: 58px 220px 240px 220px 1fr;
+  grid-template-columns: 58px 220px 210px 170px 200px 1fr;
   align-items: center;
   gap: 12px;
   padding: 9px 4px;

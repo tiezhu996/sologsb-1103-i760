@@ -9,6 +9,8 @@ export interface SheetChannelLine {
   gel: string
   intensity: number
   colorTempK: number
+  /** 开灯延迟（秒）快照，旧表无该字段时按 0 处理 */
+  delaySec: number
   focusNote: string
 }
 

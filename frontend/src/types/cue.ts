@@ -51,7 +51,9 @@ export interface CueOrderSummary {
   totalFadeInSec: number
   totalFadeOutSec: number
   totalHoldSec: number
-  /** 全场过渡总时长（秒） */
+  /** 各 Cue 最晚通道延迟之和（秒） */
+  totalDelaySec: number
+  /** 全场过渡总时长（秒，含延迟，按最晚结束的通道计） */
   totalSec: number
   adjacent: AdjacentTransition[]
 }

@@ -15,10 +15,11 @@ import {
 } from 'naive-ui'
 import BlankHint from '@/components/common/BlankHint.vue'
 import { useCueStore } from '@/stores/cueStore'
+import { useLevelStore } from '@/stores/levelStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useSheetStore } from '@/stores/sheetStore'
 import type { RehearsalSheet } from '@/types/sheet'
-import { buildSheetText, cueTotalSeconds, formatDateTime, formatSeconds } from '@/utils/fade'
+import { buildSheetText, cueEffectiveSeconds, formatDateTime, formatSeconds } from '@/utils/fade'
 import { buildSheetFilename, copyText, downloadTextFile } from '@/utils/export'
 
 const router = useRouter()
@@ -26,6 +27,7 @@ const message = useMessage()
 const dialog = useDialog()
 const sessionStore = useSessionStore()
 const cueStore = useCueStore()
+const levelStore = useLevelStore()
 const sheetStore = useSheetStore()
 
 const showAllSessions = ref(false)
@@ -104,7 +106,12 @@ function cueNoSummary(sheet: RehearsalSheet): string {
 
 function totalOf(sheet: RehearsalSheet): string {
   const total = sheet.cueLines.reduce(
-    (sum, line) => sum + cueTotalSeconds({ fadeInSec: line.fadeInSec, holdSec: line.holdSec, fadeOutSec: line.fadeOutSec }),
+    (sum, line) =>
+      sum +
+      cueEffectiveSeconds(
+        { fadeInSec: line.fadeInSec, holdSec: line.holdSec, fadeOutSec: line.fadeOutSec },
+        line.channels
+      ),
     0
   )
   return formatSeconds(total)
@@ -207,7 +214,9 @@ function goSessions(): void {
             <span class="cue-select__no mono">{{ cue.cueNo }}</span>
             <span class="cue-select__label">{{ cue.label || '（未填写提示语）' }}</span>
             <NTag size="tiny" :bordered="false">{{ cue.trigger }}</NTag>
-            <span class="cue-select__duration mono">{{ formatSeconds(cueTotalSeconds(cue)) }}</span>
+            <span class="cue-select__duration mono">{{
+              formatSeconds(cueEffectiveSeconds(cue, levelStore.levelsOfCue(cue.id)))
+            }}</span>
           </label>
         </div>
 

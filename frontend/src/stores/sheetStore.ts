@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import type { RehearsalSheet, SheetChannelLine, SheetCueLine, SheetDraft } from '@/types/sheet'
 import { db } from '@/utils/db'
 import { createId } from '@/utils/id'
+import { normalizedDelay } from '@/utils/fade'
 import { sortFixturesByChannel } from '@/utils/patch'
 import { useCueStore } from '@/stores/cueStore'
 import { useFixtureStore } from '@/stores/fixtureStore'
@@ -47,7 +48,15 @@ export const useSheetStore = defineStore('sheet', () => {
   }
 
   async function hydrate(): Promise<void> {
-    sheets.value = await db.sheets.toArray()
+    const stored = await db.sheets.toArray()
+    // 旧版排演表快照没有逐通道延迟，统一按 0 秒补齐（不回写历史快照）
+    sheets.value = stored.map((sheet) => ({
+      ...sheet,
+      cueLines: sheet.cueLines.map((line) => ({
+        ...line,
+        channels: line.channels.map((channel) => ({ ...channel, delaySec: normalizedDelay(channel.delaySec) }))
+      }))
+    }))
     hydrated.value = true
   }
 
@@ -72,6 +81,7 @@ export const useSheetStore = defineStore('sheet', () => {
             gel: fixture.gel,
             intensity: level.intensity,
             colorTempK: level.colorTempK,
+            delaySec: normalizedDelay(level.delaySec),
             focusNote: level.focusNote
           }
         })

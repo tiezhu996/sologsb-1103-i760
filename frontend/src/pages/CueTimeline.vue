@@ -23,7 +23,7 @@ import { useLevelStore } from '@/stores/levelStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { CUE_TRIGGERS, type Cue, type CueTrigger } from '@/types/cue'
 import type { FixturePosition } from '@/types/fixture'
-import { cueTotalSeconds, formatSeconds, formatTransition } from '@/utils/fade'
+import { cueEffectiveSeconds, delayLimitOfCue, findDelayViolations, formatSeconds, formatTransition, maxDelayOfCue } from '@/utils/fade'
 import { isValidCueNo, normalizeCueNo } from '@/utils/cueOrder'
 
 const route = useRoute()
@@ -147,6 +147,28 @@ function handleScopeChange(value: string | number | Array<string | number> | nul
 
 async function submitShift(): Promise<void> {
   const delta = shiftForm.deltaSec ?? 0
+  // 偏移保持 / 渐暗（向下）可能压缩延迟上限，偏移渐亮会加大开灯结束时刻；先模拟校验
+  const blocked = cues.value
+    .map((cue, index) => {
+      const projected: Cue = {
+        ...cue,
+        fadeInSec: shiftForm.scope === 'out' ? cue.fadeInSec : Math.max(0, cue.fadeInSec + delta),
+        fadeOutSec: shiftForm.scope === 'in' ? cue.fadeOutSec : Math.max(0, cue.fadeOutSec + delta)
+      }
+      const violations = findDelayViolations({
+        cue: projected,
+        nextCue: cues.value[index + 1] ?? null,
+        levels: delayLevelsOf(cue)
+      })
+      return violations.length > 0 ? cue : null
+    })
+    .filter((cue): cue is Cue => cue !== null)
+  if (blocked.length > 0) {
+    message.error(
+      `拒绝应用：${blocked.map((cue) => cue.cueNo).join('、')} 偏移后会有通道延迟越过下一条 Cue 触发时刻，请先调小这些通道的延迟`
+    )
+    return
+  }
   const affected = await cueStore.shiftFades(sessionId.value, delta, shiftForm.scope)
   message.success(`已偏移 ${affected} 条 Cue 的过渡时间（${delta > 0 ? '+' : ''}${delta}s）`)
   showShift.value = false
@@ -192,9 +214,49 @@ async function commitNote(cue: Cue): Promise<void> {
 
 type FadeField = 'fadeInSec' | 'fadeOutSec' | 'holdSec'
 
+/** 时间轴上某条 Cue 的下一条；末条返回 null */
+function nextCueOf(cue: Cue): Cue | null {
+  const ordered = cues.value
+  const index = ordered.findIndex((item) => item.id === cue.id)
+  return index >= 0 && index + 1 < ordered.length ? ordered[index + 1] : null
+}
+
+/** 该 Cue 各通道的当前延迟（带通道号，用于校验） */
+function delayLevelsOf(cue: Cue): Array<{ fixtureId: string; channel?: number; delaySec: number }> {
+  return levelStore.levelsOfCue(cue.id).map((level) => {
+    const fixture = fixtureStore.fixtureById(level.fixtureId)
+    return { fixtureId: level.fixtureId, channel: fixture?.channel, delaySec: level.delaySec }
+  })
+}
+
+/** 当前已存在延迟越界的 Cue 集合（改过保持/渐暗后可能出现） */
+const delayViolationMap = computed<Record<string, number>>(() => {
+  const map: Record<string, number> = {}
+  cues.value.forEach((cue, index) => {
+    const next = cues.value[index + 1] ?? null
+    const violations = findDelayViolations({ cue, nextCue: next, levels: delayLevelsOf(cue) })
+    if (violations.length > 0) map[cue.id] = violations.length
+  })
+  return map
+})
+
 async function commitFade(cue: Cue, field: FadeField, value: number | null): Promise<void> {
   const next = Math.max(0, value ?? 0)
   if (next === cue[field]) return
+  const projected: Cue = { ...cue, [field]: next }
+  const violations = findDelayViolations({
+    cue: projected,
+    nextCue: nextCueOf(cue),
+    levels: delayLevelsOf(cue)
+  })
+  if (violations.length > 0) {
+    const limit = delayLimitOfCue(projected, nextCueOf(cue))
+    message.error(
+      `拒绝保存：${violations.length} 个通道的开灯延迟会越过下一条 ${nextCueOf(cue)?.cueNo ?? ''} 的触发时刻` +
+        `（延迟 + 渐亮须 ≤ ${formatSeconds(limit ?? 0)}），请先到电平编辑调小延迟`
+    )
+    return
+  }
   const patch: CuePatch = {}
   if (field === 'fadeInSec') patch.fadeInSec = next
   else if (field === 'fadeOutSec') patch.fadeOutSec = next
@@ -306,7 +368,11 @@ function goSheets(): void {
 }
 
 function durationOf(cue: Cue): string {
-  return formatSeconds(cueTotalSeconds(cue))
+  return formatSeconds(cueEffectiveSeconds(cue, levelStore.levelsOfCue(cue.id)))
+}
+
+function maxDelayOf(cue: Cue): number {
+  return maxDelayOfCue(levelStore.levelsOfCue(cue.id))
 }
 
 function transitionOf(cue: Cue): string {
@@ -364,6 +430,14 @@ function channelFilterDuplicate(fixtureId: string): boolean {
             <span class="stat__label">渐暗合计</span>
           </div>
           <div class="stat">
+            <span class="stat__value mono">{{ formatSeconds(summary.totalHoldSec) }}</span>
+            <span class="stat__label">保持合计</span>
+          </div>
+          <div class="stat">
+            <span class="stat__value mono">{{ formatSeconds(summary.totalDelaySec) }}</span>
+            <span class="stat__label">开灯延迟合计</span>
+          </div>
+          <div class="stat">
             <span class="stat__value mono">{{ hardCutCount }}</span>
             <span class="stat__label">硬切衔接</span>
           </div>
@@ -376,6 +450,7 @@ function channelFilterDuplicate(fixtureId: string): boolean {
         <div class="overview-bar">
           <FadeBar
             v-if="totalDuration > 0"
+            :delay-sec="summary.totalDelaySec"
             :fade-in-sec="summary.totalFadeInSec"
             :hold-sec="summary.totalHoldSec"
             :fade-out-sec="summary.totalFadeOutSec"
@@ -489,6 +564,7 @@ function channelFilterDuplicate(fixtureId: string): boolean {
               </div>
 
               <FadeBar
+                :delay-sec="maxDelayOf(cue)"
                 :fade-in-sec="cue.fadeInSec"
                 :hold-sec="cue.holdSec"
                 :fade-out-sec="cue.fadeOutSec"
@@ -498,6 +574,10 @@ function channelFilterDuplicate(fixtureId: string): boolean {
 
               <span class="cue-row__total mono">{{ durationOf(cue) }}</span>
             </div>
+
+            <p v-if="delayViolationMap[cue.id]" class="cue-row__delay-warn">
+              ⚠ {{ delayViolationMap[cue.id] }} 个通道的开灯延迟会越过下一条触发时刻，请调小延迟或加大保持 / 渐暗
+            </p>
 
             <div class="cue-row__foot">
               <div v-if="channelsOfCue(cue.id).length > 0" class="cue-row__channels">
@@ -737,6 +817,12 @@ function channelFilterDuplicate(fixtureId: string): boolean {
 .cue-row__total {
   font-size: 13px;
   color: #f2b544;
+}
+
+.cue-row__delay-warn {
+  margin: 0;
+  font-size: 12px;
+  color: #ff9a9a;
 }
 
 .cue-row__foot {

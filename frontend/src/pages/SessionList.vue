@@ -19,16 +19,18 @@ import BlankHint from '@/components/common/BlankHint.vue'
 import FadeBar from '@/components/common/FadeBar.vue'
 import { useCueOrder } from '@/hooks/useCueOrder'
 import { useCueStore } from '@/stores/cueStore'
+import { useLevelStore } from '@/stores/levelStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import type { CueOrderSummary } from '@/types/cue'
 import { createEmptySessionDraft, type Session, type SessionDraft, type SessionStat } from '@/types/session'
-import { formatSeconds, sumCues } from '@/utils/fade'
+import { formatSeconds, sumCues, maxDelayOfCue } from '@/utils/fade'
 
 const router = useRouter()
 const message = useMessage()
 const dialog = useDialog()
 const sessionStore = useSessionStore()
 const cueStore = useCueStore()
+const levelStore = useLevelStore()
 
 const currentSessionId = computed(() => sessionStore.currentSessionId ?? '')
 const { summary: currentSummary, hardCutCount } = useCueOrder(currentSessionId)
@@ -47,11 +49,15 @@ const stats = computed<Record<string, SessionStat>>(() => {
   return map
 })
 
-/** 每个场次的过渡拆分，用于卡片上的渐变条 */
+/** 每个场次的过渡拆分，用于卡片上的渐变条（含最晚通道延迟） */
 const summaries = computed<Record<string, CueOrderSummary>>(() => {
   const map: Record<string, CueOrderSummary> = {}
   sessionStore.sortedSessions.forEach((session) => {
-    map[session.id] = sumCues(cueStore.cuesOfSession(session.id))
+    const cues = cueStore.cuesOfSession(session.id)
+    const maxDelayByCue = new Map<string, number>(
+      cues.map((cue) => [cue.id, maxDelayOfCue(levelStore.levelsOfCue(cue.id))])
+    )
+    map[session.id] = sumCues(cues, maxDelayByCue)
   })
   return map
 })
@@ -193,6 +199,7 @@ function focusSession(id: string): void {
       <div class="overview-bar">
         <FadeBar
           v-if="currentSummary.totalSec > 0"
+          :delay-sec="currentSummary.totalDelaySec"
           :fade-in-sec="currentSummary.totalFadeInSec"
           :hold-sec="currentSummary.totalHoldSec"
           :fade-out-sec="currentSummary.totalFadeOutSec"
@@ -258,6 +265,7 @@ function focusSession(id: string): void {
 
         <FadeBar
           v-if="(summaries[session.id]?.totalSec ?? 0) > 0"
+          :delay-sec="summaries[session.id]?.totalDelaySec ?? 0"
           :fade-in-sec="summaries[session.id]?.totalFadeInSec ?? 0"
           :hold-sec="summaries[session.id]?.totalHoldSec ?? 0"
           :fade-out-sec="summaries[session.id]?.totalFadeOutSec ?? 0"
